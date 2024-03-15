@@ -1,0 +1,13 @@
+DIR1="logs"
+DIR2="datasets"
+DIR3="result"
+DIR4="logs"
+DIR6="plots"
+DIR7="knapsack_solver"
+DIR8="models"
+
+mkdir -p "$DIR3/$DIR1"
+mkdir -p "$DIR2"
+mkdir -p "$DIR3/$DIR4"
+mkdir -p "$DIR3/$DIR6"
+mkdir -p "$DIR8/$DIR7"
