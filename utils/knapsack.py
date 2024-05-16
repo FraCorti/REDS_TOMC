@@ -121,6 +121,372 @@ def knapsack_find_splits_mobilenetv1(importance_score_feature_extraction_filters
 
     return subnetworks_filters_first_convolution, subnetworks_filters_depthwise, subnetworks_filters_pointwise, subnetworks_macs
 
+def ortools_knapsack_solver_mobilenetv1(feature_extraction_layers_filters_indexes, weights_memory_layers,
+                                        weights_macs_layers, weights_peak_memory_usage_layers,
+                                        capacity_peak_memory_usage,
+                                        feature_extraction_filters_score, capacity_macs,
+                                        capacity_memory_size, importance_score_pointwise_filters_kernels,
+                                        previous_optimal_solution_first_layer=None,
+                                        previous_optimal_solution_feature_extraction=None,
+                                        previous_optimal_solution_feature_creation=None, solver_time_limit=250,
+                                        last_solution_iteration_search=False, last_pointwise_filters=1,
+                                        peak_memory_constraint=True,
+                                        solver_name="GUROBI"):
+    """
+    @param previous_optimal_solution: data structure used to store the previous optimal solution found
+    @param feature_extraction_layers_filters_indexes: A list of lists (2D list) where each inner list represents a class (group) of items (number of units in a layer).
+    @param weights_macs: A 2D list (list of lists) with the same structure as classes, but containing the weights of the items.
+    @param feature_extraction_filters_score: A 2D list (list of lists) with the same structure as classes, but containing the values of the items.
+    @param capacity_macs: An integer or a float representing the maximum weight capacity of the knapsack.
+    @return: a List[int] indicating the number of filters to use for each Convolution Layer
+    """
+    solver = pywraplp.Solver.CreateSolver(solver_name)
+    solver.EnableOutput()
+    # solver.SetSolverSpecificParametersAsString('LogToConsole=1')
+
+    print("Solver name: {} Running time: {}ms".format(solver_name, int(solver_time_limit * 1000)))
+
+    solver.SetTimeLimit(int(solver_time_limit * 1000))
+    depthwise_layer_index = [0, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25]
+    feature_creation_filters_indexes = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26]
+
+    # all the 1x1 kernels have the same weight in terms of MACs
+    mac_individual_kernel_pointwise_layers = [math.ceil(weights_macs_layers[i][0] / len(weights_macs_layers[i - 1])) for
+                                              i in
+                                              range(2, len(weights_macs_layers), 2)]
+
+    memory_size_individual_kernel_pointwise_layers = [
+        math.ceil(weights_memory_layers[i][0] / len(weights_memory_layers[i - 1])) for
+        i in
+        range(2, len(weights_memory_layers), 2)]
+
+    filters_macs = []
+    filters_memory_size = []
+    filters_activation_map_size_convolution = []
+    filters_activation_map_size_pointwise = []
+
+    for depthwise_layer_index in depthwise_layer_index:
+        filters_macs.append(weights_macs_layers[depthwise_layer_index])
+        filters_memory_size.append(weights_memory_layers[depthwise_layer_index])
+        filters_activation_map_size_convolution.append(weights_peak_memory_usage_layers[depthwise_layer_index])
+
+        if depthwise_layer_index >= 1:
+            filters_activation_map_size_pointwise.append(
+                weights_peak_memory_usage_layers[depthwise_layer_index + 1])
+
+    depthwise_filters = []
+    first_convolution_layer = [solver.BoolVar(f'y_-1_{unit_index}') for unit_index in
+                               range(len(feature_extraction_layers_filters_indexes[0]))]
+
+    for layer_index, layer_units in enumerate(feature_extraction_layers_filters_indexes[1:]):
+        depthwise_filters.append(
+            [solver.BoolVar(f'dw_{layer_index}_{unit_index}') for unit_index in range(len(layer_units))])
+
+    # Objective function: sum of the importance score of the depthwise filters
+    objective = solver.Objective()
+    for unit_index in range(len(first_convolution_layer)):
+        objective.SetCoefficient(first_convolution_layer[unit_index], feature_extraction_filters_score[0][unit_index])
+
+    for layer_index, layer_units in enumerate(depthwise_filters):
+        for unit_index in range(len(layer_units)):
+            objective.SetCoefficient(depthwise_filters[layer_index][unit_index],
+                                     feature_extraction_filters_score[layer_index + 1][unit_index])
+
+    # Boolean Var: create one boolean variable for each pointwise filter of each pointwise layer
+    pointwise_filters = []
+    for index in feature_creation_filters_indexes:
+        pointwise_filters.append(
+            [solver.BoolVar(f'pf_{index}_{unit_index}') for unit_index in range(len(weights_macs_layers[index]))])
+
+    # Integer Var: create one integer variable for each pointwise layer and for the first convolution layer
+    x_0 = solver.IntVar(0, len(weights_macs_layers[0]), 'x_-1')
+    x_i = []
+    block_index = 1
+    for index in feature_creation_filters_indexes:
+        x_i.append(solver.IntVar(0, len(weights_macs_layers[index]), f'x_{block_index}'))
+        block_index += 1
+
+    # Initialize the integer variables
+    solver.Add(x_0 == solver.Sum(first_convolution_layer))
+    for pointwise_filters_index in range(len(pointwise_filters)):
+        solver.Add(x_i[pointwise_filters_index] == solver.Sum(pointwise_filters[pointwise_filters_index]))
+
+    # Boolean Var: create one boolean variable for each kernel of each pointwise filter of each pointwise layer
+    pointwise_filters_kernels = [[] for _ in range(len(pointwise_filters))]
+    for pointwise_layer_index in range(len(pointwise_filters)):
+
+        for pointwise_filter_index in range(len(pointwise_filters[pointwise_layer_index])):
+            pointwise_filters_kernels[pointwise_layer_index].append(
+                [solver.BoolVar(f'pf_kt_{pointwise_layer_index}_{pointwise_filter_index}_{pointwise_kernel_index}')
+                 for pointwise_kernel_index in
+                 range(len(importance_score_pointwise_filters_kernels[pointwise_layer_index][
+                               pointwise_filter_index]))])
+
+    if peak_memory_constraint:
+        log_print("---- Peak Memory Usage Constraint ---")
+        # Peak memory usage constraint modelling
+        layer_sums = []  # Total cost of binary variables in each layer in terms of peak-memory-usage
+
+        first_convolution_layer_sum = solver.Sum(
+            [bool_var * filters_activation_map_size_convolution[0][0] for bool_var in
+             first_convolution_layer])
+        layer_sums.append(first_convolution_layer_sum)
+        # Constraint first convolution layer peak memory activation is less than the capacity_peak_memory_usage
+        solver.Add(layer_sums[0] <= capacity_peak_memory_usage)
+
+        filters_activation_map_size_depthwise = filters_activation_map_size_convolution[1:]
+        layer_index = 1
+
+        # Add constraint for auxiliary variables depthwise filters
+        for depthwise_layer_index in range(len(depthwise_filters)):
+            layer_sum = solver.Sum(
+                [bool_var * filters_activation_map_size_depthwise[depthwise_layer_index][0] for bool_var in
+                 depthwise_filters[depthwise_layer_index]])
+            layer_sums.append(layer_sum)
+
+            # Constraint depthwise layer peak memory activation is less than the capacity_peak_memory_usage
+            solver.Add(layer_sums[layer_index] <= capacity_peak_memory_usage)
+            layer_index += 1
+
+        # Add constraint for auxiliary variables pointwise filters
+        for pointwise_layer_index in range(len(pointwise_filters)):
+            layer_sum = solver.Sum(
+                [bool_var * filters_activation_map_size_pointwise[pointwise_layer_index][0] for bool_var in
+                 pointwise_filters[pointwise_layer_index]])
+            layer_sums.append(layer_sum)
+
+            # Constraint pointwise layer peak memory activation is less than the capacity_peak_memory_usage
+            solver.Add(layer_sums[layer_index] <= capacity_peak_memory_usage)
+            layer_index += 1
+    # Define MACs constraint (capacity constraint)
+    capacity_constraint = solver.Constraint(0, capacity_macs, "ct")
+
+    # Define Memory size constraint
+    # capacity_constraint_memory_size = solver.Constraint(0, capacity_memory_size, "ms")
+
+    # Constraint: set to one the solutions previously found for the feature extraction and creation filters
+    if previous_optimal_solution_first_layer is not None:
+
+        for unit_index in range(len(first_convolution_layer)):
+            if previous_optimal_solution_first_layer[unit_index] == 1:
+                solver.Add(first_convolution_layer[unit_index] == 1)
+
+    if previous_optimal_solution_feature_creation is not None:
+
+        for layer_index, layer_units in enumerate(pointwise_filters):
+            for unit_index in range(len(layer_units)):
+                if previous_optimal_solution_feature_creation[layer_index][unit_index] == 1:
+                    solver.Add(pointwise_filters[layer_index][unit_index] == 1)
+
+    if previous_optimal_solution_feature_extraction is not None:
+
+        for layer_index, layer_units in enumerate(depthwise_filters):
+            for unit_index in range(len(layer_units)):
+                if previous_optimal_solution_feature_extraction[layer_index][unit_index] == 1:
+                    solver.Add(depthwise_filters[layer_index][unit_index] == 1)
+
+    # Constraint: first filter in standard convolution layer must be equal to number of filters in the first depthwise layer
+    solver.Add(x_0 == solver.Sum(depthwise_filters[0]))
+    for depthwise_layer_index in range(1, len(depthwise_filters)):
+        solver.Add(x_i[depthwise_layer_index - 1] == solver.Sum(depthwise_filters[depthwise_layer_index]))
+
+    # Constraint: add first layer filters weights to the capacity constraint (first layer filters are standard convolution filters)
+    for standard_convolution_filter_index in range(len(first_convolution_layer)):
+        capacity_constraint.SetCoefficient(first_convolution_layer[standard_convolution_filter_index],
+                                           filters_macs[0][standard_convolution_filter_index])
+        # capacity_constraint_memory_size.SetCoefficient(first_convolution_layer[standard_convolution_filter_index],
+        #                                               filters_memory_size[0][standard_convolution_filter_index])
+
+    # Constraint: impose filters to be taken in ascending order to preserve dense memory layout and to maximize the importance score
+    for first_convolution_filter_index in range(len(first_convolution_layer) - 1):
+        solver.Add(first_convolution_layer[first_convolution_filter_index] >= first_convolution_layer[
+            first_convolution_filter_index + 1])
+    for layer_index, layer_units in enumerate(pointwise_filters):
+        for unit_index in range(len(layer_units) - 1):
+            solver.Add(pointwise_filters[layer_index][unit_index] >= pointwise_filters[layer_index][unit_index + 1])
+    for layer_index, layer_units in enumerate(depthwise_filters):
+        for unit_index in range(len(layer_units) - 1):
+            solver.Add(depthwise_filters[layer_index][unit_index] >= depthwise_filters[layer_index][unit_index + 1])
+    # Constraint: for each layer take at least one filter and the last number of pointwise filters to be >= than last_pointwise_filters
+    solver.Add(x_0 >= 1)
+    for layer_index, layer_units in enumerate(pointwise_filters):
+        if layer_index == len(pointwise_filters) - 1:
+            solver.Add(x_i[layer_index] >= last_pointwise_filters)
+        else:
+            solver.Add(x_i[layer_index] >= 1)
+
+    # Constraint: add depthwise layer filters weights and pointwise filter kernels to the capacity constraint
+    filters_macs_depthwise = filters_macs[1:]
+    # filters_memory_size_depthwise = filters_memory_size[1:]
+
+    for layer_index, layer_units in enumerate(depthwise_filters):
+
+        for unit_index in range(len(layer_units)):
+
+            capacity_constraint.SetCoefficient(depthwise_filters[layer_index][unit_index],
+                                               filters_macs_depthwise[layer_index][
+                                                   unit_index])
+            # capacity_constraint_memory_size.SetCoefficient(depthwise_filters[layer_index][unit_index],
+            #                                               filters_memory_size_depthwise[layer_index][
+            #                                                   unit_index])
+
+            for pointwise_kernel_index in range(len(pointwise_filters_kernels[layer_index][unit_index])):
+                capacity_constraint.SetCoefficient(
+                    pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index],
+                    int(mac_individual_kernel_pointwise_layers[layer_index]))
+
+                # capacity_constraint_memory_size.SetCoefficient(
+                #    pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index],
+                #    int(memory_size_individual_kernel_pointwise_layers[layer_index]))
+
+    # Constraint: if taken a kernel t of filter k then I have to take the filter k of the pointwise layers
+    for layer_index, layer_units in enumerate(depthwise_filters):
+        for unit_index in range(len(layer_units)):
+            for pointwise_kernel_index in range(len(pointwise_filters_kernels[layer_index][unit_index])):
+                solver.Add(pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index] <=
+                           pointwise_filters[layer_index][unit_index])
+
+    # Constraint (2):
+    for layer_index, layer_units in enumerate(pointwise_filters):
+        for unit_index in range(len(layer_units)):
+            solver.Add(pointwise_filters[layer_index][unit_index] <=
+                       solver.Sum(pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index] for
+                                  pointwise_kernel_index in
+                                  range(len(pointwise_filters_kernels[layer_index][unit_index]))))
+
+    # Constraint: the number of kernel in the filter k of pointwise layer i must equal than the number of filters taken in the layer before
+    for layer_index, layer_units in enumerate(pointwise_filters_kernels):
+
+        for unit_index in range(len(layer_units)):
+            if layer_index == 0:
+                solver.Add(solver.Sum(
+                    pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index] for
+                    pointwise_kernel_index in range(len(layer_units[unit_index]))) <=
+                           x_0)
+
+            else:
+                solver.Add(solver.Sum(
+                    pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index] for
+                    pointwise_kernel_index in range(len(layer_units[unit_index]))) <=
+                           x_i[layer_index - 1])
+
+    # Constraint: if you take the filter k at layer i t the number of kernels t of filter k in layer i has
+    # to be equal than the numer of pointwise filters in the block before
+    # (number of filters of depthwise layer i) if you do not take the filter
+    # k at layer i, than constraint (3) and (4) together imply that all the
+    # kernels t of filter k at layer i have to be zero
+    for layer_index, layer_units in enumerate(pointwise_filters_kernels):
+
+        for unit_index in range(len(layer_units)):
+
+            if layer_index == 0:
+
+                solver.Add(solver.Sum(
+                    pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index] for
+                    pointwise_kernel_index in range(len(layer_units[unit_index]))) >=
+                           x_0 - (1 - pointwise_filters[layer_index][unit_index]) * len(
+                    pointwise_filters_kernels[layer_index]))
+
+            else:
+
+                solver.Add(solver.Sum(
+                    pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index] for
+                    pointwise_kernel_index in range(len(layer_units[unit_index]))) >=
+                           x_i[layer_index - 1] - (1 - pointwise_filters[layer_index][unit_index]) * len(
+                    pointwise_filters_kernels[layer_index]))
+
+    # Add Pointwise filters kernels importance score to the objective function
+    for pointwise_layer_index in range(len(importance_score_pointwise_filters_kernels)):
+        for pointwise_filter_index in range(len(importance_score_pointwise_filters_kernels[pointwise_layer_index])):
+            for pointwise_kernel_index in range(len(importance_score_pointwise_filters_kernels[pointwise_layer_index][
+                                                        pointwise_filter_index])):
+                objective.SetCoefficient(
+                    pointwise_filters_kernels[pointwise_layer_index][pointwise_filter_index][pointwise_kernel_index],
+                    importance_score_pointwise_filters_kernels[pointwise_layer_index][pointwise_filter_index][
+                        pointwise_kernel_index])
+
+    objective.SetMaximization()
+
+    # Print model to file for debug purposes
+    # log_print(solver.ExportModelAsLpFormat(False).replace('\\', '').replace(',_', ','), printing=False)
+    # Solve
+    print(f"Solver constraints: {solver.NumConstraints()}")
+    print(f"Solver variables: {solver.NumVariables()}")
+    start_time = time.time()
+    status = solver.Solve()
+    end_time = time.time()
+    elapsed_time_seconds = end_time - start_time
+    log_print(f"Elapsed time: {elapsed_time_seconds} seconds")
+    first_convolution_layer_indexes = []  # indexes of the first convolution layer
+    depthwise_indexes = [[] for _ in range(len(depthwise_filters))]
+    pointwise_indexes = [[] for _ in range(len(pointwise_filters))]
+
+    # iterate over the bool var to save the solution found by the knapsack solver
+    for first_convolution_filter_index in range(len(first_convolution_layer)):
+        if first_convolution_layer[first_convolution_filter_index].solution_value() == 1:
+            first_convolution_layer_indexes.append(first_convolution_filter_index)
+
+    for depthwise_layer_index in range(len(depthwise_filters)):
+
+        for unit_index in range(len(depthwise_filters[depthwise_layer_index])):
+
+            if depthwise_filters[depthwise_layer_index][unit_index].solution_value() == 1:
+                depthwise_indexes[depthwise_layer_index].append(unit_index)
+
+    for pointwise_layer_index in range(len(pointwise_filters)):
+
+        for unit_index in range(len(pointwise_filters[pointwise_layer_index])):
+
+            if pointwise_filters[pointwise_layer_index][unit_index].solution_value() == 1:
+                pointwise_indexes[pointwise_layer_index].append(unit_index)
+
+    solution_macs = 0  # solution macs of the solution found by the knapsack solver
+
+    # add the macs of the first convolution layer
+    solution_macs += sum([filters_macs[0][index] for index in first_convolution_layer_indexes])
+    print("First convolution layer MACs: {}".format(solution_macs))
+
+    depthwise_macs = filters_macs[1:]
+    for block_index in range(len(depthwise_indexes)):
+        block_macs = 0
+        block_macs += sum([depthwise_macs[block_index][index] for index in depthwise_indexes[block_index]])
+        block_macs += len(pointwise_indexes[block_index]) * len(depthwise_indexes[block_index])
+        print("Current block MACs: " + str(block_macs))
+        solution_macs += block_macs
+
+    print("MACs capacity: " + str(capacity_macs), "Solution MACs: " + str(solution_macs))
+
+    # A solution has been found (or we are in the last iteration), save the solutions found
+    if solution_macs <= capacity_macs or last_solution_iteration_search:
+
+        # iterate over the bool var to save the solution found by the knapsack solver
+        for first_convolution_filter_index in range(len(first_convolution_layer)):
+
+            if first_convolution_layer[first_convolution_filter_index].solution_value() == 1:
+                if previous_optimal_solution_first_layer is not None and \
+                        previous_optimal_solution_first_layer[first_convolution_filter_index] == 0:
+                    previous_optimal_solution_first_layer[first_convolution_filter_index] = 1
+
+        for depthwise_layer_index in range(len(depthwise_filters)):
+
+            for unit_index in range(len(depthwise_filters[depthwise_layer_index])):
+                if depthwise_filters[depthwise_layer_index][unit_index].solution_value() == 1:
+                    if previous_optimal_solution_feature_extraction is not None and \
+                            previous_optimal_solution_feature_extraction[depthwise_layer_index][unit_index] == 0:
+                        previous_optimal_solution_feature_extraction[depthwise_layer_index][unit_index] = 1
+
+        for pointwise_layer_index in range(len(pointwise_filters)):
+
+            for unit_index in range(len(pointwise_filters[pointwise_layer_index])):
+                if pointwise_filters[pointwise_layer_index][unit_index].solution_value() == 1:
+                    if previous_optimal_solution_feature_creation is not None and \
+                            previous_optimal_solution_feature_creation[pointwise_layer_index][unit_index] == 0:
+                        previous_optimal_solution_feature_creation[pointwise_layer_index][unit_index] = 1
+
+    return max(first_convolution_layer_indexes), [max(filter_indexes) for
+                                                  filter_indexes in
+                                                  depthwise_indexes], [
+        max(filter_indexes) for filter_indexes in pointwise_indexes], solution_macs
 
 def knapsack_find_splits_ds_cnn(importance_list, macs_list, memory_list, macs_targets, memory_targets,
                                 importance_score_pointwise_filters_kernels,
