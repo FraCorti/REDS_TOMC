@@ -129,7 +129,7 @@ class Reds_DepthwiseConv2D(tf.keras.layers.Layer):
                        :].shape) + np.prod(
             self.bias[:int(self.filters_splittings[subnetwork_index])].shape) if self.use_bias else 0
 
-    def compute_layer_lookup_table(self, inputs, filters_dimensions=2):
+    def compute_layer_inference_estimations(self, inputs, filters_dimensions=2):
         """
         Compute the number of MACs for each unit considered inside the layer and the memory bytes required to store it
         @param inputs: the input tensor to the layer
@@ -152,13 +152,19 @@ class Reds_DepthwiseConv2D(tf.keras.layers.Layer):
         output_channels, output_height, output_width, _ = activation_map.shape
         layer_macs = output_channels * channels * kernel_height * kernel_width * output_height * output_width
 
+        single_activation_map_parameters_number = int(tf.size(activation_map[:, :, :, :]).numpy() / layer_units)
+        activation_map_element_memory_size = activation_map.dtype.size
+        filters_activation_maps_memory = np.full(layer_units,
+                                                 single_activation_map_parameters_number * activation_map_element_memory_size,
+                                                 dtype=float)
+
         filters_parameters_number = tf.size(self.depthwise_kernel).numpy() / layer_units
         element_size = self.depthwise_kernel.dtype.size
         filters_byte_memory = np.full(layer_units, filters_parameters_number * element_size, dtype=float)
 
         units_macs = np.full(layer_units, layer_macs / layer_units, dtype=float)
 
-        return activation_map, units_macs, filters_byte_memory
+        return activation_map, units_macs, filters_byte_memory, filters_activation_maps_memory
 
     def call(self, inputs, **kwargs):
 
@@ -406,7 +412,7 @@ class Reds_Ds_Cnn_Vision_Model_L(tf.keras.Model):
     def get_model_name(self):
         return "Wake_Word_DS_CNN_L"
 
-    def compute_lookup_table(self, input_shape):
+    def compute_inference_estimations(self, train_data_shape):
         """
         Compute the lookup table for the model given the training data set. A batch of the data is passed as input
         inside the model and the linear operation associated to the layer is performed for average_run times. Then the
@@ -417,18 +423,20 @@ class Reds_Ds_Cnn_Vision_Model_L(tf.keras.Model):
 
         layers_filters_macs = []
         layers_filters_byte = []
+        layers_filters_activation_map_byte = []
 
-        inputs = tf.ones((1, input_shape[0], input_shape[1], input_shape[2]), dtype=tf.dtypes.float32)
+        inputs = tf.ones(train_data_shape, dtype=tf.dtypes.float32)
 
         for layer in self.layers:
 
             if isinstance(layer, Reds_DepthwiseConv2D) or isinstance(layer, Reds_2DConvolution_Standard):
-                inputs, macs, filters_byte_memory = layer.compute_layer_lookup_table(
+                inputs, macs, filters_byte_memory, filters_activation_maps_memory = layer.compute_layer_inference_estimations(
                     inputs=inputs)
                 layers_filters_macs.append(macs)
                 layers_filters_byte.append(filters_byte_memory)
+                layers_filters_activation_map_byte.append(filters_activation_maps_memory)
 
-        return layers_filters_macs, layers_filters_byte
+        return layers_filters_macs, layers_filters_byte, layers_filters_activation_map_byte
 
     def build(self, input_shape):
         """
@@ -698,7 +706,7 @@ class Reds_Ds_Cnn_Vision_Model(tf.keras.Model):
     def get_model_name(self):
         return "Wake_Word_DS_CNN"
 
-    def compute_lookup_table(self, input_shape):
+    def compute_inference_estimations(self, train_data_shape):
         """
         Compute the lookup table for the model given the training data set. A batch of the data is passed as input
         inside the model and the linear operation associated to the layer is performed for average_run times. Then the
@@ -709,18 +717,20 @@ class Reds_Ds_Cnn_Vision_Model(tf.keras.Model):
 
         layers_filters_macs = []
         layers_filters_byte = []
+        layers_filters_activation_map_byte = []
 
-        inputs = tf.ones((1, input_shape[0], input_shape[1], input_shape[2]), dtype=tf.dtypes.float32)
+        inputs = tf.ones(train_data_shape, dtype=tf.dtypes.float32)
 
         for layer in self.layers:
 
             if isinstance(layer, Reds_DepthwiseConv2D) or isinstance(layer, Reds_2DConvolution_Standard):
-                inputs, macs, filters_byte_memory = layer.compute_layer_lookup_table(
+                inputs, macs, filters_byte_memory, filters_activation_maps_memory = layer.compute_layer_inference_estimations(
                     inputs=inputs)
                 layers_filters_macs.append(macs)
                 layers_filters_byte.append(filters_byte_memory)
+                layers_filters_activation_map_byte.append(filters_activation_maps_memory)
 
-        return layers_filters_macs, layers_filters_byte
+        return layers_filters_macs, layers_filters_byte, layers_filters_activation_map_byte
 
     def build(self, input_shape):
         """

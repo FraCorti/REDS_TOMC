@@ -4,7 +4,7 @@ from utils.convolution import get_model_convolutional_layers_number, Reds_2DConv
 from utils.ds_convolution import get_pointwise_convolutions_layers_weights
 
 
-def get_feature_extraction_layers_gradient_indexes(gradients):
+def get_depthwise_layers_gradient_indexes(gradients):
     """
     Iterate over the computed gradients and store the position of the convolution weight and
     bias gradients
@@ -15,7 +15,8 @@ def get_feature_extraction_layers_gradient_indexes(gradients):
 
     for gradient_layer_index in range(len(gradients)):
 
-        if gradients[gradient_layer_index].shape.ndims >= 4 and gradients[gradient_layer_index].shape[1] != 1:
+        if gradients[gradient_layer_index].shape.ndims >= 4 and gradients[gradient_layer_index].shape[1] != 1 and \
+                gradients[gradient_layer_index].shape[3] != 1000:
             convolution_gradients_indexes.append(gradient_layer_index)
 
     return convolution_gradients_indexes
@@ -50,46 +51,10 @@ def get_pointwise_layers_gradients_indexes(gradients):
     for gradient_layer_index in range(len(gradients)):
 
         if gradients[gradient_layer_index].shape.ndims >= 4 and gradients[gradient_layer_index].shape[1] == 1 and \
-                gradients[gradient_layer_index].shape[3] != 1000:
+                gradients[gradient_layer_index].shape[0] == 1:
             convolution_gradients_indexes.append(gradient_layer_index)
 
     return convolution_gradients_indexes
-
-
-def compute_accumulated_gradients_pointwise_layers_debug(model, train_data, loss_fn, args, debug=True):
-    """
-    Compute the gradients accumulated for the pointwise layers
-    """
-    gradients_accumulation = []
-    first_gradients = True
-    mini_batches_number = args.minibatch_number
-    convolution_parameters_gradients_indexes = None
-
-    # compute gradients and accumulate it
-    with tf.GradientTape() as tape:
-        predictions = model(
-            tf.keras.applications.mobilenet.preprocess_input(tf.convert_to_tensor(tf.random.normal([64, 224, 224, 3]))),
-            training=True)
-
-        loss = loss_fn(tf.random.uniform([64], minval=1, maxval=1001, dtype=tf.int32), predictions)
-
-    gradients = tape.gradient(loss, model.trainable_variables)
-
-    if convolution_parameters_gradients_indexes == None:
-        convolution_parameters_gradients_indexes = get_pointwise_layers_gradients_indexes(gradients=gradients)
-
-    convolution_gradients = [gradients[index] for index in convolution_parameters_gradients_indexes]
-
-    if first_gradients:
-        [gradients_accumulation.append(gradient) for gradient in convolution_gradients]
-        first_gradients = False
-    else:
-        for gradient_index in range(len(gradients_accumulation)):
-            gradients_accumulation[gradient_index] = tf.math.add(gradients_accumulation[gradient_index],
-                                                                 convolution_gradients[gradient_index])
-
-    return gradients_accumulation
-
 
 def compute_accumulated_gradients_ds_cnn_layers(model, train_data, loss_fn, args):
     """
@@ -129,7 +94,7 @@ def compute_accumulated_gradients_ds_cnn_layers(model, train_data, loss_fn, args
     return gradients_accumulation
 
 
-def compute_accumulated_gradients_pointwise_layers(model, train_data, loss_fn, args):
+def compute_accumulated_gradients_pointwise_layers(model, train_data, loss_fn, args, debug=False):
     """
     Compute the gradients accumulated for the pointwise layers
     """
@@ -145,8 +110,9 @@ def compute_accumulated_gradients_pointwise_layers(model, train_data, loss_fn, a
 
         # compute gradients and accumulate it
         with tf.GradientTape() as tape:
+            predictions = model(tf.keras.applications.mobilenet.preprocess_input(images), training=True)
 
-            predictions = model(images, training=True)  # tf.keras.applications.mobilenet.preprocess_input(
+            labels = tf.convert_to_tensor(labels)
             loss = loss_fn(labels, predictions)
 
         gradients = tape.gradient(loss, model.trainable_variables)
@@ -209,47 +175,6 @@ def compute_accumulated_gradients_dnn(model, train_data, loss_fn, args):
 
     return gradients_accumulation
 
-
-def compute_accumulated_gradients_debug(model, train_data, loss_fn, args):
-    """
-    Accumulate a number of gradients equal to the number of minibatches defined
-    @param model: pretrained model
-    @param train_data: training dataset
-    @return: the accumulated gradients for each layer of the pretrained network
-    """
-    gradients_accumulation = []
-    first_gradients = True
-    mini_batches_number = args.minibatch_number
-    convolution_parameters_gradients_indexes = None
-
-    # compute gradients and accumulate it
-    with tf.GradientTape() as tape:
-        predictions = model(
-            tf.keras.applications.mobilenet.preprocess_input(tf.convert_to_tensor(tf.random.normal([64, 224, 224, 3]))),
-            training=True)
-
-        labels = tf.convert_to_tensor(tf.random.uniform([64], minval=1, maxval=1001, dtype=tf.int32))
-        loss = loss_fn(labels, predictions)
-
-    gradients = tape.gradient(loss, model.trainable_variables)
-    if convolution_parameters_gradients_indexes == None:
-        convolution_parameters_gradients_indexes = get_feature_extraction_layers_gradient_indexes(
-            gradients=gradients)
-
-    convolution_gradients = [gradients[index] for index in convolution_parameters_gradients_indexes]
-
-    if first_gradients:
-        [gradients_accumulation.append(gradient) for gradient in convolution_gradients]
-        first_gradients = False
-    else:
-        for gradient_index in range(len(gradients_accumulation)):
-            gradients_accumulation[gradient_index] = tf.math.add(gradients_accumulation[gradient_index],
-                                                                 convolution_gradients[gradient_index])
-    mini_batches_number -= 1
-
-    return gradients_accumulation
-
-
 def compute_accumulated_gradients_ds_cnn(model, train_data, loss_fn, args):
     """
     Accumulate a number of gradients equal to the number of minibatches defined
@@ -275,7 +200,7 @@ def compute_accumulated_gradients_ds_cnn(model, train_data, loss_fn, args):
         gradients = tape.gradient(loss, model.trainable_variables)
 
         if convolution_parameters_gradients_indexes == None:
-            convolution_parameters_gradients_indexes = get_feature_extraction_layers_gradient_indexes(
+            convolution_parameters_gradients_indexes = get_depthwise_layers_gradient_indexes(
                 gradients=gradients)
 
         convolution_gradients = [gradients[index] for index in convolution_parameters_gradients_indexes]
@@ -311,16 +236,14 @@ def compute_accumulated_gradients_mobilenetv1(model, train_data, loss_fn, args, 
 
         # compute gradients and accumulate it
         with tf.GradientTape() as tape:
-            predictions = model(tf.convert_to_tensor(tf.random.normal([64, 224, 224, 3]))) if debug else model(
-                tf.keras.applications.mobilenet.preprocess_input(images), training=True)
+            predictions = model(tf.keras.applications.mobilenet.preprocess_input(images), training=True)
 
             labels = tf.convert_to_tensor(labels)
-            loss = loss_fn(tf.random.uniform([64], minval=1, maxval=1001, dtype=tf.int32) if debug else labels,
-                           predictions)
+            loss = loss_fn(labels, predictions)
 
         gradients = tape.gradient(loss, model.trainable_variables)
         if convolution_parameters_gradients_indexes == None:
-            convolution_parameters_gradients_indexes = get_feature_extraction_layers_gradient_indexes(
+            convolution_parameters_gradients_indexes = get_depthwise_layers_gradient_indexes(
                 gradients=gradients)
 
         convolution_gradients = [gradients[index] for index in convolution_parameters_gradients_indexes]
@@ -335,53 +258,6 @@ def compute_accumulated_gradients_mobilenetv1(model, train_data, loss_fn, args, 
         mini_batches_number -= 1
 
     return gradients_accumulation
-
-
-def get_convolutional_layers_number(model):
-    conv_layers_number = 0
-
-    for layer in model.layers:
-        if isinstance(layer, tf.keras.layers.Conv2D) or isinstance(layer, Reds_2DConvolution_Standard):
-            conv_layers_number += 1
-
-    return conv_layers_number
-
-
-def assign_pretrained_ds_convolution_filters_ds_cnn(model, permuted_convolutional_filters, permuted_convolutional_bias,
-                                                    trainable_assigned_depthwise_convolution=True,
-                                                    trainable_assigned_pointwise_convolution=True):
-    """
-    Given a model and a list of permuted convolutional filters and bias assign the corresponding filters and bias to the
-    layer
-    """
-
-    layer_index = 0
-    first_layer = True
-    for layer in model.layers:
-
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            layer.weights[0].assign(
-                permuted_convolutional_filters[layer_index])
-            layer.weights[1].assign(
-                permuted_convolutional_bias[layer_index])
-
-            if first_layer:
-                first_layer = False
-                layer.trainable = False
-            else:
-                layer.trainable = trainable_assigned_pointwise_convolution
-
-            layer_index += 1
-
-        if isinstance(layer, tf.keras.layers.DepthwiseConv2D):
-            layer.weights[0].assign(
-                permuted_convolutional_filters[layer_index])
-            layer.weights[1].assign(
-                permuted_convolutional_bias[layer_index])
-
-            layer.trainable = trainable_assigned_depthwise_convolution
-            layer_index += 1
-
 
 def assign_pretrained_ds_convolution_filters(model, permuted_convolutional_filters,
                                              permuted_convolutional_bias=None,
@@ -829,11 +705,6 @@ def permute_filters_cnn(model, filters_descending_ranking):
     return model_convolution_layers, model_convolution_bias, last_permutation_filters_order
 
 
-def get_model_convolutional_layers(model):
-    convolutional_layer_number = get_model_convolutional_layers_number(model=model)
-    return model.trainable_weights[0:convolutional_layer_number]
-
-
 def compute_descending_filters_score_indexes_ds_cnn(model, importance_score_filters, units_number=64):
     """
     @param model: pretrained model
@@ -871,6 +742,7 @@ def compute_descending_filters_score_indexes_ds_cnn(model, importance_score_filt
             list_tuples_score[x][1] for x in range(len(list_tuples_score)))
 
     return descending_importance_score_indexes, descending_importance_score_scores
+
 
 def compute_descending_filters_score_indexes_mobilenet(model, importance_score_filters, units_number=None):
     """
@@ -988,35 +860,6 @@ def compute_descending_filters_score_indexes_cnn(model, importance_score_filters
     return descending_importance_score_indexes, descending_importance_score_scores
 
 
-def get_ds_convolution_layers(model):
-    convolution_layers = []
-
-    for layer in model.layers:
-
-        if isinstance(layer, tf.keras.layers.DepthwiseConv2D):
-            convolution_layers.append(layer.weights[0])
-
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            convolution_layers.append(layer.weights[0])
-
-    return convolution_layers
-
-
-def get_ds_convolution_bias(model):
-    convolution_bias = []
-    first_layer = True
-    for layer in model.layers:
-
-        if isinstance(layer, tf.keras.layers.DepthwiseConv2D) or isinstance(layer,
-                                                                            tf.keras.layers.Conv2D) and first_layer is True:
-            convolution_bias.append(layer.weights[1])
-
-            if first_layer is True:
-                first_layer = False
-
-    return convolution_bias
-
-
 def get_all_convolution_layers(model):
     convolution_layers = []
 
@@ -1081,23 +924,6 @@ def get_standard_cnn_convolution_bias(model):
             convolution_bias.append(layer.weights[1])
 
     return convolution_bias
-
-
-def get_convolution_bias(model):
-    convolution_bias = []
-
-    first_layer = True
-    for layer in model.layers:
-
-        if first_layer and isinstance(layer, tf.keras.layers.Conv2D):
-            convolution_bias.append(layer.weights[1])
-            first_layer = False
-
-        if isinstance(layer, tf.keras.layers.DepthwiseConv2D):
-            convolution_bias.append(layer.weights[1])
-
-    return convolution_bias
-
 
 def get_dense_layers(model):
     dense_layers = []
@@ -1206,90 +1032,12 @@ def compute_pointwise_importance_score_ds_cnn(model, gradients_accumulation_poin
 
                 flattened_filter = tf.reshape(filter, [-1])
                 for kernel in range(len(flattened_filter)):
-                    importance_score_pointwise_filters[layer_index][filter_index][kernel] = round(
-                        int_scale * float((flattened_filter[kernel])))
+                    importance_score_pointwise_filters[layer_index][filter_index][kernel] =  round(int_scale * float(
+                        (flattened_filter[kernel])))  #
 
                 filter_index += 1
 
     return importance_score_pointwise_filters
-
-def compute_filters_importance_score_feature_extraction_filters_l2_norm(model):
-    """
-        @param model: pretrained CNN model
-        @return: return a list of list containing the importance score for each filter in the CNN convolutional layer
-        """
-    model_convolution_layers = get_feature_extraction_layers(model=model)
-
-    importance_score_filters = []
-    # add first layer number of filter
-    importance_score_filters.append(list(range(model_convolution_layers[0].shape[3])))
-
-    # create a list of list for each depth-wise convolution layer containing the number of spatial filters in the layer
-    [importance_score_filters.append(list(range(model_convolution_layers[layer_index].shape[2]))) for layer_index
-     in
-     range(1, len(model_convolution_layers), 1)]
-
-    first_layer = True
-
-    for layer_index in range(len(model_convolution_layers)):
-
-        importance_scores_parameters = tf.abs(x=model_convolution_layers[layer_index])
-
-        filter_index = 0
-
-        # first layer is a standard convolution layer
-        if first_layer is True:
-            for filter in tf.transpose(importance_scores_parameters, (3, 0, 1, 2)):
-                importance_score_filters[layer_index][filter_index] = float(tf.norm(tensor=filter, ord=2))
-                filter_index += 1
-            first_layer = False
-
-        else:
-            # depth-wise convolution layers
-            for filter in tf.transpose(importance_scores_parameters, (2, 0, 1, 3)):
-                importance_score_filters[layer_index][filter_index] = float(tf.norm(tensor=filter, ord=2))
-                filter_index += 1
-
-    return importance_score_filters
-def compute_filters_importance_score_feature_extraction_filters_l1_norm(model):
-    """
-        @param model: pretrained CNN model
-        @return: return a list of list containing the importance score for each filter in the CNN convolutional layer
-        """
-    model_convolution_layers = get_feature_extraction_layers(model=model)
-
-    importance_score_filters = []
-    # add first layer number of filter
-    importance_score_filters.append(list(range(model_convolution_layers[0].shape[3])))
-
-    # create a list of list for each depth-wise convolution layer containing the number of spatial filters in the layer
-    [importance_score_filters.append(list(range(model_convolution_layers[layer_index].shape[2]))) for layer_index
-     in
-     range(1, len(model_convolution_layers), 1)]
-
-    first_layer = True
-
-    for layer_index in range(len(model_convolution_layers)):
-
-        importance_scores_parameters = tf.abs(x=model_convolution_layers[layer_index])
-
-        filter_index = 0
-
-        # first layer is a standard convolution layer
-        if first_layer is True:
-            for filter in tf.transpose(importance_scores_parameters, (3, 0, 1, 2)):
-                importance_score_filters[layer_index][filter_index] = float(tf.norm(tensor=filter, ord=1))
-                filter_index += 1
-            first_layer = False
-
-        else:
-            # depth-wise convolution layers
-            for filter in tf.transpose(importance_scores_parameters, (2, 0, 1, 3)):
-                importance_score_filters[layer_index][filter_index] = float(tf.norm(tensor=filter, ord=1))
-                filter_index += 1
-
-    return importance_score_filters
-
 
 def compute_filters_importance_score_feature_extraction_filters(model, gradients_accumulation):
     """

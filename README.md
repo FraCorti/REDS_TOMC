@@ -1,7 +1,7 @@
 # REDS:  Resource-Efficient Deep Subnetworks for Dynamic Resource Constraints
 
 
-In this work we introduce Resource-Efficient Deep Subnetworks (REDS) to tackle model adaptation to variable resources. In contrast to the state-of-the-art, REDS use structured sparsity constructively by exploiting permutation invariance of neurons, which allows for hardware-specific optimizations. Specifically, REDS achieve computational efficiency by (1) skipping sequential computational blocks identified by a novel iterative knapsack optimizer, and (2) leveraging simple math to re-arrange the order of operations in REDS computational graph to take advantage of the data cache. REDS support conventional deep networks frequently deployed on the edge and provide computational benefits even for small and simple networks. We evaluate REDS on seven benchmark architectures trained on the [Visual Wake Words](https://arxiv.org/pdf/1906.05721.pdf), [Google Speech Commands](https://arxiv.org/pdf/1804.03209.pdf), [Fashion-MNIST](https://github.com/zalandoresearch/fashion-mnist) and [CIFAR10](https://www.cs.toronto.edu/~kriz/cifar.html) datasets, and test on four off-the-shelf mobile and embedded hardware platforms. We provide a theoretical result and empirical evidence for REDS outstanding performance in terms of submodels' test set accuracy, and demonstrate an adaptation time in response to dynamic resource constraints of under 40 microseconds of models deployed on [Arduino Nano 33 BLE Sense](https://docs.arduino.cc/hardware/nano-33-ble-sense) through [Tensorflow Lite for Microcontrollers](https://github.com/tensorflow/tflite-micro). 
+In this work we introduce Resource-Efficient Deep Subnetworks (REDS) to tackle model adaptation to variable resources. In contrast to the state-of-the-art, REDS use structured sparsity constructively by exploiting permutation invariance of neurons, which allows for hardware-specific optimizations. Specifically, REDS achieve computational efficiency by (1) skipping sequential computational blocks identified by a novel iterative knapsack optimizer, and (2) leveraging simple math to re-arrange the order of operations in REDS computational graph to take advantage of the data cache. REDS support conventional deep networks frequently deployed on the edge and provide computational benefits even for small and simple networks. We evaluate REDS on seven benchmark architectures trained on the [Google Speech Commands](https://arxiv.org/pdf/1804.03209.pdf), [Fashion-MNIST](https://github.com/zalandoresearch/fashion-mnist), [CIFAR10](https://www.cs.toronto.edu/~kriz/cifar.html) and [ImageNet1K](https://www.image-net.org/) datasets, and test on four off-the-shelf mobile and embedded hardware platforms. We provide a theoretical result and empirical evidence for REDS outstanding performance in terms of submodels' test set accuracy, and demonstrate an adaptation time in response to dynamic resource constraints of under 40 microseconds of models deployed on [Arduino Nano 33 BLE Sense](https://docs.arduino.cc/hardware/nano-33-ble-sense) through [Tensorflow Lite for Microcontrollers](https://github.com/tensorflow/tflite-micro). 
 
 ## Software prerequisites
 
@@ -52,7 +52,6 @@ python kws_dnn.py --gurobi_license_file path/to/license/gurobi.lic --gurobi_home
 python kws_convolution_cnn.py --gurobi_license_file path/to/license/gurobi.lic --gurobi_home path/to/installation//gurobi/gurobi1002/linux64 
 ```
 
-
 ## Analysis results on Pixel 6 and Xiaomi Redmi Note 9 Pro 
 The results obtained from the subnetworks configuration are obtained from the official Google
 Tensorflow Lite benchmarking [tool](https://www.tensorflow.org/lite/performance/measurement). From left to right: number of model parameters, model accuracy and model inference
@@ -70,7 +69,7 @@ as a function of MAC percentage in each REDS subnetwork.
 To download the Visual Wake Words dataset please refer to [this](https://github.com/arpit6232/visualwakeup_aesd) github repository. The tf-record files need to be located inside the *visualwakeup_aesd/data*, you do not need to convert the Tensorflow Object Detection API proto files because they are already provided as python files in the *visualwakeup_aesd/lib* folder. 
 
 ## Fine-tune MobileNet v1 model 
-After downloading and convert the Visual Wake Words dataset to tf-record files you can run the [MobileNet v1](https://arxiv.org/pdf/1704.04861.pdf) finetuning. Be careful that the GUROBI solver and Visual Wake Words RAM consumption can take up to 30 GB. Run the following command from the shell:  
+After downloading and convert the Visual Wake Words dataset to tf-record files you can run the [MobileNet v1](https://arxiv.org/pdf/1704.04861.pdf) finetuning. The GUROBI solver and Visual Wake Words RAM consumption can take up to 30 GB. Run the following command from the shell:  
 
 ```
 python knapsack_mobilenetv1_leaky_relu.py --gurobi_license_file path/to/license/gurobi.lic --gurobi_home path/to/installation//gurobi/gurobi1002/linux64 
@@ -79,10 +78,17 @@ python knapsack_mobilenetv1_leaky_relu.py --gurobi_license_file path/to/license/
 The peak memory usage analysis for the MobileNet v1 backbone is obtained from the [tflite tools](https://github.com/eliberis/tflite-tools). The knapsack OR-Tools formulation can be found in the *knapsack.py* file in the *ortools_knapsack_solver_mobilenetv1* function.  
 <img src="result/plots/SRAM_MobileNetV1_vww_96_96_3_1constraint.png" width="270"/> <img src="result/plots/SRAM_MobileNetV1_vww_96_96_3_2constraints_200KB.png" width="270"/>
 
-To run the solver *without* the peak memory usage constraint pass the *--peak_memory_constraint* flag to the python script. Be careful to set a timer to the solver when doing that by passing the flag *--solver_time_limit* followed by the number of seconds needed (ie. 40000 should be fine, in case is not increase it). Be careful that the GUROBI solver could be take up to 50 GB of RAM during the subnetwork architecture search process. 
+To run the solver *without* the peak memory usage constraint pass the *--peak_memory_constraint* flag to the python script. Be careful to set a timer to the solver when doing that by passing the flag *--solver_time_limit* followed by the number of seconds needed. GUROBI solver could be take up to 50 GB of RAM during the subnetwork architecture search process. 
+l. 
 
-In all the analysis we conduct the peak memory usage is considered the [maximum size](https://dl.acm.org/doi/pdf/10.1145/3569468) in bytes between all the activation maps produced by the model. 
+## REDS for Vision Transformers
+To run the Integer Linear Programming Structural Pruning formulation for ViT run the following command:
 
+```
+python ViT_ILP --gurobi_license_file path/to/license/gurobi.lic --gurobi_home path/to/installation//gurobi/gurobi1002/linux64 --hugginface_token personal_hugginface_token --model_name vit_model_name
+```
+
+Remember need to pass as flag your personal [Hugginface User Access Token](https://huggingface.co/docs/hub/security-tokens) to create the streaming ImageNet1k dataloader using the [Hugginface datasets](https://huggingface.co/docs/hub/security-tokens) library. 
 
 ## TensorFlow Lite for Microcontrollers Analysis 
-TO BE PUBLISHED
+We extended the Tensorflow Lite for Microcontrollers framework to support REDS out of the box and measure on-device inference and submodel switching time. The code is available [here](https://github.com/aschesklave/TFlite-Micro-Cutting). 

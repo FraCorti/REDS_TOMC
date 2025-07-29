@@ -7,12 +7,11 @@ from keras import constraints
 
 from utils.batch_normalization import Reds_BatchNormalizationBase
 from utils.convolution import Linear_Adaptive, Reds_2DConvolution_Standard
-from utils.logs import print_intermediate_activations
 
 
-def get_reds_ds_cnn_architecture(model_settings,
+def get_reds_ds_cnn_architecture(model_settings, model_filters,
                                  classes=12, debug=False, use_bias=True,
-                                 subnetworks_number=4, model_filters=64, model_size="l"):
+                                 subnetworks_number=4, model_size="l"):
     if model_size == "l":
         return Reds_Ds_Cnn_Wake_Model_L(classes=classes, use_bias=use_bias,
                                         subnetworks_number=subnetworks_number,
@@ -117,10 +116,12 @@ class Reds_DepthwiseConv2D(tf.keras.layers.Layer):
         """
 
         return np.prod(self.depthwise_kernel[:, :, 0:int(self.filters_splittings[subnetwork_index]),
-                       :].shape) + np.prod(
-            self.bias[:int(self.filters_splittings[subnetwork_index])].shape) if self.use_bias else 0
+                       :].shape) + 0 if not self.use_bias else np.prod(
+            self.depthwise_kernel[:, :, 0:int(self.filters_splittings[subnetwork_index]),
+            :].shape) + np.prod(
+            self.bias[:int(self.filters_splittings[subnetwork_index])].shape)
 
-    def compute_layer_lookup_table(self, inputs, filters_dimensions=2):
+    def compute_layer_inference_estimations(self, inputs, filters_dimensions=2):
         """
         Compute the number of MACs for each unit considered inside the layer and the memory bytes required to store it
         @param inputs: the input tensor to the layer
@@ -143,13 +144,19 @@ class Reds_DepthwiseConv2D(tf.keras.layers.Layer):
         output_channels, output_height, output_width, _ = activation_map.shape
         layer_macs = output_channels * channels * kernel_height * kernel_width * output_height * output_width
 
+        single_activation_map_parameters_number = int(tf.size(activation_map[:, :, :, :]).numpy() / layer_units)
+        activation_map_element_memory_size = activation_map.dtype.size
+        filters_activation_maps_memory = np.full(layer_units,
+                                                 single_activation_map_parameters_number * activation_map_element_memory_size,
+                                                 dtype=float)
+
         filters_parameters_number = tf.size(self.depthwise_kernel).numpy() / layer_units
         element_size = self.depthwise_kernel.dtype.size
         filters_byte_memory = np.full(layer_units, filters_parameters_number * element_size, dtype=float)
 
         units_macs = np.full(layer_units, layer_macs / layer_units, dtype=float)
 
-        return activation_map, units_macs, filters_byte_memory
+        return activation_map, units_macs, filters_byte_memory, filters_activation_maps_memory
 
     def call(self, inputs, **kwargs):
 
@@ -183,9 +190,8 @@ def set_trainable_pointwise_batch_norm(model, trainable_pointwise_batch_norm=Tru
             layer.trainable = trainable_pointwise_batch_norm
 
 
-def get_pointwise_convolutions_layers_weights(model, classes=1000):
+def get_pointwise_convolutions_layers_weights(model):
     pointwise_layers_weights = []
-    pointwise_layers_biases = []
     first_layer = True
 
     for layer in model.layers:
@@ -194,21 +200,17 @@ def get_pointwise_convolutions_layers_weights(model, classes=1000):
             if first_layer:
                 first_layer = False
                 continue
-            if layer.weights[0].shape[3] != classes:
+            if layer.weights[0].shape[0] == 1 and layer.weights[0].shape[1] == 1:
                 pointwise_layers_weights.append(layer.weights[0])
-            # pointwise_layers_biases.append(layer.weights[1])
 
     return pointwise_layers_weights
 
-
 class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
-    def __init__(self, classes, subnetworks_number, model_settings,
+    def __init__(self, classes, subnetworks_number, model_settings, model_filters,
                  batch_dimensions=4, pool_size=(13, 5), strides_h_first_convolution=2, stride_w_first_convolution=1,
                  strides_first_depth_wise=2,
-                 model_filters=64,
                  use_bias=True,
                  debug=False):
-
         super(Reds_Ds_Cnn_Wake_Model_L, self).__init__()
         self.model_settings = model_settings
 
@@ -216,7 +218,7 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
             (self.model_settings['spectrogram_length'], self.model_settings['dct_coefficient_count'], 1),
             input_shape=(self.model_settings['fingerprint_size'], 1))
 
-        self.standard_convolution = Reds_2DConvolution_Standard(in_channels=1, out_channels=model_filters,
+        self.standard_convolution = Reds_2DConvolution_Standard(in_channels=1, out_channels=model_filters[0],
                                                                 kernel_size=(10, 4),
                                                                 batch_dimensions=batch_dimensions,
                                                                 use_bias=use_bias,
@@ -225,53 +227,53 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
                                                                 debug=debug, padding='same')
         self.batch_norm1 = Reds_BatchNormalizationBase(fused=False)
         self.relu1 = tf.keras.layers.ReLU()
-        self.depthwise1 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise1 = Reds_DepthwiseConv2D(in_channels=model_filters[0], kernel_size=(3, 3),
                                                use_bias=use_bias,
                                                strides=(strides_first_depth_wise, strides_first_depth_wise),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm2 = Reds_BatchNormalizationBase(fused=False)
         self.relu2 = tf.keras.layers.ReLU()
-        self.pointwise_conv1 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv1 = Reds_2DConvolution_Standard(in_channels=model_filters[0], out_channels=model_filters[1],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
                                                            debug=debug, padding='valid')
         self.batch_norm3 = Reds_BatchNormalizationBase(fused=False)
         self.relu3 = tf.keras.layers.ReLU()
-        self.depthwise2 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise2 = Reds_DepthwiseConv2D(in_channels=model_filters[1], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm4 = Reds_BatchNormalizationBase(fused=False)
         self.relu4 = tf.keras.layers.ReLU()
-        self.pointwise_conv2 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv2 = Reds_2DConvolution_Standard(in_channels=model_filters[1], out_channels=model_filters[2],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
                                                            debug=debug, padding='valid')
         self.batch_norm5 = Reds_BatchNormalizationBase(fused=False)
         self.relu5 = tf.keras.layers.ReLU()
-        self.depthwise3 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise3 = Reds_DepthwiseConv2D(in_channels=model_filters[2], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm6 = Reds_BatchNormalizationBase(fused=False)
         self.relu6 = tf.keras.layers.ReLU()
-        self.pointwise_conv3 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv3 = Reds_2DConvolution_Standard(in_channels=model_filters[2], out_channels=model_filters[3],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
                                                            debug=debug, padding='valid')
         self.batch_norm7 = Reds_BatchNormalizationBase(fused=False)
         self.relu7 = tf.keras.layers.ReLU()
-        self.depthwise4 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise4 = Reds_DepthwiseConv2D(in_channels=model_filters[3], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm8 = Reds_BatchNormalizationBase(fused=False)
         self.relu8 = tf.keras.layers.ReLU()
-        self.pointwise_conv4 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv4 = Reds_2DConvolution_Standard(in_channels=model_filters[3], out_channels=model_filters[4],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
@@ -279,13 +281,13 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
         self.batch_norm9 = Reds_BatchNormalizationBase(fused=False)
         self.relu9 = tf.keras.layers.ReLU()
 
-        self.depthwise5 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise5 = Reds_DepthwiseConv2D(in_channels=model_filters[4], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm10 = Reds_BatchNormalizationBase(fused=False)
         self.relu10 = tf.keras.layers.ReLU()
-        self.pointwise_conv5 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv5 = Reds_2DConvolution_Standard(in_channels=model_filters[4], out_channels=model_filters[5],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
@@ -296,7 +298,7 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
         self.avg_pool = tf.keras.layers.AvgPool2D(pool_size=(pool_size[0], pool_size[1]),
                                                   strides=(pool_size[0], pool_size[1]), padding='valid')
         self.flatten = tf.keras.layers.Flatten()
-        self.fc1 = Linear_Adaptive(in_features=model_filters, out_features=classes,
+        self.fc1 = Linear_Adaptive(in_features=model_filters[5], out_features=classes,
                                    debug=debug, use_bias=use_bias)
 
         self.subnetworks_number = subnetworks_number
@@ -403,7 +405,7 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
     def get_model_name(self):
         return "Wake_Word_DS_CNN_L"
 
-    def compute_lookup_table(self, train_data, average_run=100):
+    def compute_inference_estimations(self, train_data_shape=(1, 49, 10, 1)):
         """
         Compute the lookup table for the model given the training data set. A batch of the data is passed as input
         inside the model and the linear operation associated to the layer is performed for average_run times. Then the
@@ -414,18 +416,20 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
 
         layers_filters_macs = []
         layers_filters_byte = []
+        layers_filters_activation_map_byte = []
 
-        inputs = tf.ones((1, 49, 10, 1), dtype=tf.dtypes.float32)
+        inputs = tf.ones(train_data_shape, dtype=tf.dtypes.float32)
 
         for layer in self.layers:
 
             if isinstance(layer, Reds_DepthwiseConv2D) or isinstance(layer, Reds_2DConvolution_Standard):
-                inputs, macs, filters_byte_memory = layer.compute_layer_lookup_table(
+                inputs, macs, filters_byte_memory, filters_activation_maps_memory = layer.compute_layer_inference_estimations(
                     inputs=inputs)
                 layers_filters_macs.append(macs)
                 layers_filters_byte.append(filters_byte_memory)
+                layers_filters_activation_map_byte.append(filters_activation_maps_memory)
 
-        return layers_filters_macs, layers_filters_byte
+        return layers_filters_macs, layers_filters_byte, layers_filters_activation_map_byte
 
     def build(self, input_shape):
         """
@@ -517,10 +521,9 @@ class Reds_Ds_Cnn_Wake_Model_L(tf.keras.Model):
 
 class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
 
-    def __init__(self, classes, subnetworks_number, model_settings,
+    def __init__(self, classes, subnetworks_number, model_settings, model_filters,
                  batch_dimensions=4, pool_size=(25, 5), strides_h_first_convolution=2, stride_w_first_convolution=2,
                  strides_first_depth_wise=1,
-                 model_filters=64,
                  use_bias=True,
                  debug=False):
 
@@ -530,7 +533,7 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
         self.reshape = tf.keras.layers.Reshape(
             (self.model_settings['spectrogram_length'], self.model_settings['dct_coefficient_count'], 1),
             input_shape=(self.model_settings['fingerprint_size'], 1))
-        self.standard_convolution = Reds_2DConvolution_Standard(in_channels=1, out_channels=model_filters,
+        self.standard_convolution = Reds_2DConvolution_Standard(in_channels=1, out_channels=model_filters[0],
                                                                 kernel_size=(10, 4),
                                                                 batch_dimensions=batch_dimensions,
                                                                 use_bias=use_bias,
@@ -539,53 +542,53 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
                                                                 debug=debug, padding='same')
         self.batch_norm1 = Reds_BatchNormalizationBase(fused=False)
         self.relu1 = tf.keras.layers.ReLU()
-        self.depthwise1 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise1 = Reds_DepthwiseConv2D(in_channels=model_filters[0], kernel_size=(3, 3),
                                                use_bias=use_bias,
                                                strides=(strides_first_depth_wise, strides_first_depth_wise),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm2 = Reds_BatchNormalizationBase(fused=False)
         self.relu2 = tf.keras.layers.ReLU()
-        self.pointwise_conv1 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv1 = Reds_2DConvolution_Standard(in_channels=model_filters[0], out_channels=model_filters[1],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
                                                            debug=debug, padding='valid')
         self.batch_norm3 = Reds_BatchNormalizationBase(fused=False)
         self.relu3 = tf.keras.layers.ReLU()
-        self.depthwise2 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise2 = Reds_DepthwiseConv2D(in_channels=model_filters[1], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm4 = Reds_BatchNormalizationBase(fused=False)
         self.relu4 = tf.keras.layers.ReLU()
-        self.pointwise_conv2 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv2 = Reds_2DConvolution_Standard(in_channels=model_filters[1], out_channels=model_filters[2],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
                                                            debug=debug, padding='valid')
         self.batch_norm5 = Reds_BatchNormalizationBase(fused=False)
         self.relu5 = tf.keras.layers.ReLU()
-        self.depthwise3 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise3 = Reds_DepthwiseConv2D(in_channels=model_filters[2], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm6 = Reds_BatchNormalizationBase(fused=False)
         self.relu6 = tf.keras.layers.ReLU()
-        self.pointwise_conv3 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv3 = Reds_2DConvolution_Standard(in_channels=model_filters[2], out_channels=model_filters[3],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
                                                            debug=debug, padding='valid')
         self.batch_norm7 = Reds_BatchNormalizationBase(fused=False)
         self.relu7 = tf.keras.layers.ReLU()
-        self.depthwise4 = Reds_DepthwiseConv2D(in_channels=model_filters, kernel_size=(3, 3),
+        self.depthwise4 = Reds_DepthwiseConv2D(in_channels=model_filters[3], kernel_size=(3, 3),
                                                use_bias=use_bias, strides=(1, 1),
                                                batch_dimensions=batch_dimensions,
                                                debug=debug, padding='same')
         self.batch_norm8 = Reds_BatchNormalizationBase(fused=False)
         self.relu8 = tf.keras.layers.ReLU()
-        self.pointwise_conv4 = Reds_2DConvolution_Standard(in_channels=model_filters, out_channels=model_filters,
+        self.pointwise_conv4 = Reds_2DConvolution_Standard(in_channels=model_filters[3], out_channels=model_filters[4],
                                                            kernel_size=(1, 1),
                                                            batch_dimensions=batch_dimensions,
                                                            use_bias=use_bias, strides=(1, 1),
@@ -595,7 +598,7 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
         self.avg_pool = tf.keras.layers.AvgPool2D(pool_size=(pool_size[0], pool_size[1]),
                                                   strides=(pool_size[0], pool_size[1]), padding='valid')
         self.flatten = tf.keras.layers.Flatten()
-        self.fc1 = Linear_Adaptive(in_features=model_filters, out_features=classes,
+        self.fc1 = Linear_Adaptive(in_features=model_filters[4], out_features=classes,
                                    debug=debug, use_bias=use_bias)
 
         self.subnetworks_number = subnetworks_number
@@ -604,6 +607,7 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
         self.classes = classes
         self.use_bias = use_bias
         self.dense_model_trainable_weights = 0
+        self.model_filters = model_filters
 
     def trainable_layers(self, trainable_parameters=True, trainable_batch_normalization=False):
         for layer in self.layers:
@@ -636,9 +640,13 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
             if isinstance(layer, Reds_BatchNormalizationBase) or isinstance(layer,
                                                                             tf.keras.layers.Reshape) or isinstance(
                 layer, tf.keras.layers.ReLU) or isinstance(layer, tf.keras.layers.Flatten) or isinstance(layer,
-                                                                                                         tf.keras.layers.AveragePooling2D) or isinstance(
-                layer, Linear_Adaptive):
+                                                                                                         tf.keras.layers.AveragePooling2D):
                 continue
+            elif isinstance(layer, Linear_Adaptive):
+                subnetwork_trainable_parameters += np.prod(
+                    layer.weights[0][0:int(self.pointwise_conv4.filters_splittings[subnetwork_index]), :].shape)
+                subnetwork_trainable_parameters += np.prod(
+                    layer.weights[1][0:int(self.pointwise_conv4.filters_splittings[subnetwork_index])].shape)
             else:
                 subnetwork_trainable_parameters += layer.get_trainable_parameters_number(
                     subnetwork_index=subnetwork_index)
@@ -702,7 +710,7 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
     def get_model_name(self):
         return "Wake_Word_DS_CNN"
 
-    def compute_lookup_table(self, train_data, average_run=100):
+    def compute_inference_estimations(self, train_data_shape=(1, 49, 10, 1)):
         """
         Compute the lookup table for the model given the training data set. A batch of the data is passed as input
         inside the model and the linear operation associated to the layer is performed for average_run times. Then the
@@ -710,26 +718,23 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
         @return: List[List] containing the filters forward times for each layer
         List[List] containing the filters macs for each layer
         """
-        # inputs = None
-        # for images, _ in train_data.take(1):
-        #    inputs = images
-        #    break
 
         layers_filters_macs = []
         layers_filters_byte = []
+        layers_filters_activation_map_byte = []
 
-        # Create a dummy input 1x49x10x1 for the model to compute the lookup table
-        inputs = tf.ones((1, 49, 10, 1), dtype=tf.dtypes.float32)
+        inputs = tf.ones(train_data_shape, dtype=tf.dtypes.float32)
 
         for layer in self.layers:
 
             if isinstance(layer, Reds_DepthwiseConv2D) or isinstance(layer, Reds_2DConvolution_Standard):
-                inputs, macs, filters_byte_memory = layer.compute_layer_lookup_table(
+                inputs, macs, filters_byte_memory, filters_activation_maps_memory = layer.compute_layer_inference_estimations(
                     inputs=inputs)
                 layers_filters_macs.append(macs)
                 layers_filters_byte.append(filters_byte_memory)
+                layers_filters_activation_map_byte.append(filters_activation_maps_memory)
 
-        return layers_filters_macs, layers_filters_byte
+        return layers_filters_macs, layers_filters_byte, layers_filters_activation_map_byte
 
     def build(self, input_shape):
         """
@@ -810,8 +815,3 @@ class Reds_Ds_Cnn_Wake_Model(tf.keras.Model):
         inputs = self.fc1(inputs)
 
         return inputs
-
-    def get_model(self):
-        model = tf.keras.Sequential()
-
-        return model

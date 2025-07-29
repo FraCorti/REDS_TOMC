@@ -92,60 +92,8 @@ def calculate_accuracy(predicted_indices, expected_indices):
     return accuracy
 
 
-def compute_accuracy_train_validation(model, model_settings, train_data, val_data, message="", confusion_matrix=False):
-    expected_indices = np.concatenate([y for x, y in train_data])
-
-    predictions = model.predict(train_data)
-    predicted_indices = tf.argmax(predictions, axis=1)
-
-    val_accuracy = calculate_accuracy(predicted_indices, expected_indices)
-
-    if confusion_matrix:
-        confusion_matrix = tf.math.confusion_matrix(expected_indices, predicted_indices,
-                                                    num_classes=model_settings['label_count'])
-        print(confusion_matrix.numpy())
-    print(f'Train accuracy = {val_accuracy * 100:.2f}%')
-
-    expected_indices = np.concatenate([y for x, y in val_data])
-
-    predictions = model.predict(val_data)
-    predicted_indices = tf.argmax(predictions, axis=1)
-
-    val_accuracy = calculate_accuracy(predicted_indices, expected_indices)
-
-    if confusion_matrix:
-        confusion_matrix = tf.math.confusion_matrix(expected_indices, predicted_indices,
-                                                    num_classes=model_settings['label_count'])
-        print(confusion_matrix.numpy())
-
-    print(f'{message} Validation accuracy = {val_accuracy * 100:.2f}%')
-
-def compute_accuracy_test_mobilenet(model, test_data, message="", confusion_matrix=False):
-    # Evaluate on testing set.
-    #expected_indices = np.concatenate([y for x, y in test_data])
-
-    #test_input_data = np.concatenate(([x for x, y in test_data]))
-    #print(test_input_data.shape)
-    test_accuracy = []
-    for x, y in test_data:
-
-        predictions = model.predict(tf.keras.applications.mobilenet.preprocess_input(x), verbose=0)
-        predicted_indices = tf.argmax(predictions, axis=1)
-
-        accuracy_batch = calculate_accuracy(predicted_indices, tf.cast(y, dtype=tf.int64))
-
-        if confusion_matrix:
-            confusion_matrix = tf.math.confusion_matrix(tf.cast(y, dtype=tf.int64), predicted_indices,
-                                                        num_classes=1000)
-            print(confusion_matrix.numpy())
-
-        test_accuracy.append(accuracy_batch * 100)
-
-
-    print(f'{message} Test accuracy = {tf.reduce_mean(test_accuracy):.2f}%')
-    return test_accuracy
-
 def compute_accuracy_test(model, test_data, model_settings=None, message="", confusion_matrix=False):
+
     # Evaluate on testing set.
     expected_indices = np.concatenate([y for x, y in test_data])
 

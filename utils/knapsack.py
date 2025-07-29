@@ -1,3 +1,4 @@
+import copy
 import math
 import os
 from functools import partial
@@ -534,7 +535,7 @@ def knapsack_find_splits_ds_cnn(importance_list, macs_list, memory_list, macs_ta
                     filters_score=importance_list,
                     units_layer_size=units_layer_size,
                     capacity_macs=int(macs_targets[subnetwork_mac_index]) if bottom_up else int(
-                        macs_targets[subnetwork_mac_index]),  # + residual_macs
+                        macs_targets[subnetwork_mac_index]),
                     importance_score_pointwise_filters_kernels=importance_score_pointwise_filters_kernels,
                     capacity_memory_size=memory_targets[subnetwork_mac_index],
                     previous_optimal_solution_first_layer=optimal_subsolutions_first_layer,
@@ -552,7 +553,7 @@ def knapsack_find_splits_ds_cnn(importance_list, macs_list, memory_list, macs_ta
                     filters_score=importance_list,
                     units_layer_size=units_layer_size,
                     capacity_macs=int(macs_targets[subnetwork_mac_index]) if bottom_up else int(
-                        macs_targets[subnetwork_mac_index]),  # + residual_macs
+                        macs_targets[subnetwork_mac_index]),
                     capacity_memory_size=memory_targets[subnetwork_mac_index],
                     solver_time_limit=args.solver_time_limit * solver_time_multiplier,
                     last_pointwise_filters=last_pointwise_filters,
@@ -758,7 +759,6 @@ def initialize_nested_knapsack_solver_ds_cnn(layers_filters_macs, layers_filters
 
             layers_filters_macs[layer_index][item_index] = round(layers_filters_macs[layer_index][item_index])
 
-    # The smallest index of neurons belonging to each layer
     layer_index_split = []
 
     initial_index = 0
@@ -776,12 +776,10 @@ def initialize_nested_knapsack_solver_ds_cnn(layers_filters_macs, layers_filters
 
     memory_targets = []
 
-    # scale the initial target to be the subnetworks constraints
-    for subnetworks_number in range(subnetworks_number - 1):
+    for subnetworks_number in range(subnetworks_number):
         macs_targets.append(round(initial_macs * constraints_percentages[subnetworks_number]))
         memory_targets.append(round(initial_memory * constraints_percentages[subnetworks_number]))
 
-    log_print("Initial MACS: {} MACS targets: {}".format(initial_macs, macs_targets))
 
     return descending_importance_score_scores, layers_filters_macs, layers_filters_byte, macs_targets, memory_targets
 
@@ -830,7 +828,6 @@ def initialize_nested_knapsack_solver_cnn(layers_filters_macs, layers_filters_by
     macs_targets = []
     memory_targets = []
 
-    # scale the initial target to be the subnetworks constraints
     for subnetworks_number in range(subnetworks_number - 1):
         macs_targets.append(round(initial_macs * constraints_percentages[subnetworks_number]))
         memory_targets.append(round(initial_memory * constraints_percentages[subnetworks_number]))
@@ -844,7 +841,7 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
                                    previous_optimal_solution_first_layer=None,
                                    previous_optimal_solution_feature_extraction=None,
                                    previous_optimal_solution_feature_creation=None, solver_time_limit=250,
-                                   last_solution_iteration_search=False, last_pointwise_filters=1, model_size="s",
+                                   last_solution_iteration_search=False, last_pointwise_filters=30, model_size="s",
                                    solver_name="GUROBI"):
     """
     @param previous_optimal_solution: data structure used to store the previous optimal solution found
@@ -859,13 +856,22 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
     solver.SetSolverSpecificParametersAsString('LogToConsole=1')
 
     print("Solver name: {} Running time: {}ms".format(solver_name, int(solver_time_limit * 1000)))
-
+    print("Filters to be must picked: {}".format(last_pointwise_filters))
     solver.SetTimeLimit(int(solver_time_limit * 1000))
 
-    # all the 1x1 kernels have the same weight in terms of MACs
-    mac_individual_kernel_pointwise_layers = [math.ceil(weights_macs_layers[i][0] / len(weights_macs_layers[i - 1])) for
-                                              i in
-                                              range(2, len(weights_macs_layers), 2)]
+
+    if model_size == "s":
+        print("Set Tensorflow profiler MACs for DS-CNN s model")
+        macs_first_convolution_layer_unit = int((73125 + 4060) / 64)
+        macs_depthwise_convolution_layer_unit = int((73125 + 4060) / 64)
+        macs_pointwise_convolution_layer_unit = int((530000 + 4060) / 64)
+        mac_individual_kernel_pointwise_layers = int(macs_pointwise_convolution_layer_unit / 64)
+    elif model_size == "l":
+        print("Set Tensorflow profiler MACs for DS-CNN l model")
+        macs_first_convolution_layer_unit = int((620000 + 34500) / 276)
+        macs_depthwise_convolution_layer_unit = int((161460 + 8970) / 276)
+        macs_pointwise_convolution_layer_unit = int((4950000 + 8970) / 276)
+        mac_individual_kernel_pointwise_layers = int(macs_pointwise_convolution_layer_unit / 276)
 
     weights_macs = []
     if model_size == "l":
@@ -937,12 +943,19 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
             if previous_optimal_solution_first_layer[unit_index] == 1:
                 solver.Add(first_convolution_layer[unit_index] == 1)
 
+    last_pointwise_filters_final = copy.deepcopy(last_pointwise_filters)
     if previous_optimal_solution_feature_creation is not None:
 
         for layer_index, layer_units in enumerate(pointwise_filters):
             for unit_index in range(len(layer_units)):
                 if previous_optimal_solution_feature_creation[layer_index][unit_index] == 1:
                     solver.Add(pointwise_filters[layer_index][unit_index] == 1)
+
+            if layer_index == len(pointwise_filters) - 1:
+                for unit_index in range(len(pointwise_filters[layer_index])):
+                    if previous_optimal_solution_feature_creation[layer_index][unit_index] == 1:
+                        last_pointwise_filters_final += 1
+
 
     if previous_optimal_solution_feature_extraction is not None:
 
@@ -959,7 +972,7 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
     # Constraint: add first layer filters weights to the capacity constraint (first layer filters are standard convolution filters)
     for standard_convolution_filter_index in range(len(first_convolution_layer)):
         capacity_constraint.SetCoefficient(first_convolution_layer[standard_convolution_filter_index],
-                                           weights_macs[0][standard_convolution_filter_index])
+                                           macs_first_convolution_layer_unit)
 
     # Constraint: impose the pointwise filters to be taken in ascending order to preserve the memory layout
     for layer_index, layer_units in enumerate(pointwise_filters):
@@ -970,9 +983,9 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
     solver.Add(x_0 >= 1)
     for layer_index, layer_units in enumerate(pointwise_filters):
         if layer_index == len(pointwise_filters) - 1:
-            solver.Add(x_i[layer_index] >= last_pointwise_filters)
+            solver.Add(x_i[layer_index] >= int(last_pointwise_filters_final))
         else:
-            solver.Add(x_i[layer_index] >= 1)
+            solver.Add(x_i[layer_index] >= last_pointwise_filters )
 
     # Constraint: add depthwise layer filters weights to the capacity constraint
     weights_macs_depthwise = weights_macs[1:]
@@ -981,13 +994,12 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
         for unit_index in range(len(layer_units)):
 
             capacity_constraint.SetCoefficient(depthwise_filters[layer_index][unit_index],
-                                               weights_macs_depthwise[layer_index][
-                                                   unit_index])
+                                               macs_depthwise_convolution_layer_unit)
 
             for pointwise_kernel_index in range(len(pointwise_filters_kernels[layer_index][unit_index])):
                 capacity_constraint.SetCoefficient(
                     pointwise_filters_kernels[layer_index][unit_index][pointwise_kernel_index],
-                    int(mac_individual_kernel_pointwise_layers[layer_index]))
+                    mac_individual_kernel_pointwise_layers)
 
     # Constraint: if taken a kernel t of filter k then I have to take the filter k of the pointwise layers
     for layer_index, layer_units in enumerate(depthwise_filters):
@@ -1124,6 +1136,14 @@ def ortools_knapsack_solver_ds_cnn(layers, weights_macs_layers, weights_memory, 
     log_print(depthwise_indexes)
     log_print("Pointwise layer indexes: ")
     log_print(pointwise_indexes)
+
+    total_macs = sum(capacity_constraint.GetCoefficient(v) * v.solution_value()
+                     for v in solver.variables()
+                     if capacity_constraint.GetCoefficient(v) != 0)
+
+    log_print("--------- Computed from OR-Tools --------- Total MACs: {} ------------------".format(total_macs), printing=True)
+
+
     return max(first_convolution_layer_indexes), [max(filter_indexes) for
                                                   filter_indexes in
                                                   depthwise_indexes], [

@@ -2,7 +2,10 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import numpy as np
 from tensorflow.python.ops.numpy_ops import np_config
+from sklearn.metrics import accuracy_score
+
 np_config.enable_numpy_behavior()
+
 
 def augment_mnist(image, label):
     image = tf.image.random_flip_left_right(image)
@@ -18,6 +21,7 @@ def augment_mnist(image, label):
     label = label.astype(tf.int64)
     return image, label
 
+
 def get_dataset(dataset_name, batch_size=128, normalization=True):
     if dataset_name == "mnist":
         return get_mnist_train_test(batch_size)
@@ -28,6 +32,7 @@ def get_dataset(dataset_name, batch_size=128, normalization=True):
         return get_cifar10_train_test(batch_size)
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
+
 
 def preprocess_augment_cifar10(image, label):
     image = image.astype('float32') / 255.0
@@ -41,11 +46,13 @@ def preprocess_augment_cifar10(image, label):
     # label = (label < 5).astype(np.uint8)
     return image, label
 
+
 def normalize_cifar10(image, label):
     image = image.astype('float32') / 255.0
     image = (image - np.array((0.4914, 0.4822, 0.4465))) / np.array((0.2470, 0.2435, 0.2616))
     label = label.astype("int64")
     return image, label
+
 
 def get_mnist_train_test(batch_size):
     mnist = tf.keras.datasets.mnist
@@ -69,6 +76,49 @@ def get_mnist_train_test(batch_size):
     return train_ds, test_ds
 
 
+def get_fashion_mnist_train_test_no_augment(batch_size):
+    fashion_mnist = tf.keras.datasets.fashion_mnist
+
+    (x_train, y_train), (x_test, y_test) = fashion_mnist.load_data()
+    x_train, x_test = x_train / 255.0, x_test / 255.0
+
+    # Add a channels dimension
+    x_train = x_train[..., tf.newaxis].astype("float32")
+    x_test = x_test[..., tf.newaxis].astype("float32")
+
+    y_test = y_test.astype("int64")
+    y_train = y_train.astype("int64")
+
+    train_ds = tf.data.Dataset.from_tensor_slices(
+        (x_train, y_train))
+    train_ds = train_ds.shuffle(10000).batch(batch_size)
+
+    test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(batch_size)
+    return train_ds, test_ds
+
+
+def rotate_image(image, label):
+    return tf.image.rot90(image, k=1), label
+
+
+def get_fashion_mnist_train_rotated(batch_size):
+    fashion_mnist = tf.keras.datasets.fashion_mnist
+
+    (x_train, y_train), _ = fashion_mnist.load_data()
+    x_train = x_train / 255.0
+
+    # Add a channels dimension
+    x_train = x_train[..., tf.newaxis].astype("float32")
+
+    y_train = y_train.astype("int64")
+
+    train_ds = tf.data.Dataset.from_tensor_slices(
+        (x_train, y_train))
+    train_ds = train_ds.map(rotate_image, num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = train_ds.shuffle(10000).batch(batch_size)
+    return train_ds
+
+
 def get_fashion_mnist_train_test(batch_size):
     fashion_mnist = tf.keras.datasets.fashion_mnist
 
@@ -89,6 +139,35 @@ def get_fashion_mnist_train_test(batch_size):
 
     test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(batch_size)
     return train_ds, test_ds
+
+
+def compute_model_test_set_accuracy_dataset(model, dataset_name="fashion_mnist"):
+    if dataset_name == "fashion_mnist":
+        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.fashion_mnist.load_data()
+        x_train, x_test = x_train / 255.0, x_test / 255.0
+
+        # Add a channels dimension
+        x_train = x_train[..., tf.newaxis].astype("float32")
+        x_test = x_test[..., tf.newaxis].astype("float32")
+
+        y_test = y_test.astype("int64")
+        y_train = y_train.astype("int64")
+
+    if dataset_name == "cifar10":
+        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+        test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test))
+        test_ds = test_ds.map(normalize_cifar10)
+
+    # Make predictions
+    predictions = model.predict(x_test)
+
+    # For a classification problem with categorical labels
+    predicted_classes = np.argmax(predictions, axis=1)
+    true_classes = np.argmax(y_test, axis=1)
+
+    # Calculate accuracy
+    accuracy = accuracy_score(true_classes, predicted_classes)
+    print(f"Test set accuracy: {accuracy:.4f}")
 
 
 def get_cifar10_train_test(batch_size):

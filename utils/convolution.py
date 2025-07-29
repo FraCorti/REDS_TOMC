@@ -148,14 +148,14 @@ class Reds_Cnn_Wake_Model(tf.keras.Model):
 
         inputs = tf.ones((1, 49, 10, 1), dtype=tf.float32)
 
-        inputs, macs, filters_byte_memory = self.conv1.compute_layer_lookup_table(inputs=inputs)
+        inputs, macs, filters_byte_memory = self.conv1.compute_layer_inference_estimations(inputs=inputs)
         layers_filters_macs.append(macs)
         layers_filters_byte.append(filters_byte_memory)
 
         inputs = self.batch_norm1(inputs)
         inputs = self.relu1(inputs)
 
-        inputs, macs, filters_byte_memory = self.conv2.compute_layer_lookup_table(
+        inputs, macs, filters_byte_memory = self.conv2.compute_layer_inference_estimations(
             inputs=inputs)
         layers_filters_macs.append(macs)
         layers_filters_byte.append(filters_byte_memory)
@@ -357,19 +357,24 @@ class Reds_2DConvolution_Standard(tf.keras.layers.Layer):
 
         # pointwise convolution layer
         if self.kernel.shape[0] == 1:
-            return np.prod(self.kernel[:, :, :, 0:int(self.filters_splittings[subnetwork_index])].shape) + np.prod(
-                self.b[:int(self.filters_splittings[subnetwork_index])].shape) if self.use_bias else 0
+            return np.prod(self.kernel[:, :, :, 0:int(
+                self.filters_splittings[subnetwork_index])].shape) + 0 if not self.use_bias else np.prod(self.kernel[:, :, :, 0:int(
+                self.filters_splittings[subnetwork_index])].shape) + np.prod(
+                self.b[:int(self.filters_splittings[subnetwork_index])].shape)
         else:
             # first convolution layer, to change if standard cnn are used
             return np.prod(self.kernel[:, :, :,
-                           0:int(self.filters_splittings[subnetwork_index])].shape) + np.prod(
-                self.b[:int(self.filters_splittings[subnetwork_index])].shape) if self.use_bias else 0
+                           0:int(
+                               self.filters_splittings[subnetwork_index])].shape) + 0 if not self.use_bias else np.prod(self.kernel[:, :, :,
+                           0:int(
+                               self.filters_splittings[subnetwork_index])].shape) + np.prod(
+                self.b[:int(self.filters_splittings[subnetwork_index])].shape)
 
     def add_splitting_filters_indexes(self, filters_indexes):
         self.filters_splittings = tf.concat([self.filters_splittings, tf.constant([filters_indexes], dtype=tf.int32)],
                                             axis=0)
 
-    def compute_layer_lookup_table(self, inputs):
+    def compute_layer_inference_estimations(self, inputs):
         """
         Compute the lookup table for each layer, retrieve each filter of the layer and compute the forward time by
         applying the convolution operator on the input and average the forward time over the number of runs.
@@ -378,7 +383,7 @@ class Reds_2DConvolution_Standard(tf.keras.layers.Layer):
         @return: the lookup table for the layer and the transformed input
         """
 
-        layer_filters = self.kernel.shape[3]
+        layer_units = self.kernel.shape[3]
 
         activation_map = tf.nn.convolution(
             input=inputs,
@@ -393,15 +398,21 @@ class Reds_2DConvolution_Standard(tf.keras.layers.Layer):
         kernel_height, kernel_width, input_channels, output_channels = self.kernel.shape
         samples_number, output_height, output_width, _ = activation_map.shape
         filter_macs = (
-                              samples_number * kernel_height * kernel_width * input_channels * output_channels * output_height * output_width) / layer_filters
+                              samples_number * kernel_height * kernel_width * input_channels * output_channels * output_height * output_width) / layer_units
 
-        macs = np.full(layer_filters, filter_macs, dtype=float)
+        macs = np.full(layer_units, filter_macs, dtype=float)
 
-        filters_parameters_number = tf.size(self.kernel).numpy() / self.kernel.shape[3]
-        element_size = self.kernel.dtype.size
-        filters_byte_memory = np.full(layer_filters, filters_parameters_number * element_size, dtype=float)
+        layers_weights_number = tf.size(self.kernel).numpy() / self.kernel.shape[3]
+        weight_byte_amount = self.kernel.dtype.size
+        filters_byte_memory = np.full(layer_units, layers_weights_number * weight_byte_amount, dtype=float)
 
-        return activation_map, macs, filters_byte_memory
+        single_activation_map_parameters_number = int(tf.size(activation_map[:, :, :, :]).numpy() / layer_units)
+        activation_map_element_memory_size = activation_map.dtype.size
+        filters_activation_maps_memory = np.full(layer_units,
+                                                 single_activation_map_parameters_number * activation_map_element_memory_size,
+                                                 dtype=float)
+
+        return activation_map, macs, filters_byte_memory, filters_activation_maps_memory
 
     def call(self, inputs, **kwargs):
 

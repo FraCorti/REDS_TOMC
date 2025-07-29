@@ -10,10 +10,10 @@ import tensorflow as tf
 from utils.forward import classification_head_finetuning_ds_cnn, \
     convert_ds_cnn_model_to_reds, accuracy, cross_entropy_loss, train_model
 from utils.importance_score import compute_filters_importance_score_feature_extraction_filters, \
-    permute_filters_mobilenet, permute_batch_norm_ds_cnn_layers, assign_pretrained_ds_convolution_filters, \
-    compute_descending_filters_score_indexes_mobilenet, compute_accumulated_gradients_pointwise_layers, \
+    permute_batch_norm_ds_cnn_layers, assign_pretrained_ds_convolution_filters, \
+    compute_accumulated_gradients_pointwise_layers, \
     compute_pointwise_importance_score_ds_cnn, compute_accumulated_gradients_ds_cnn, \
-    compute_accumulated_gradients_ds_cnn_layers, compute_descending_filters_score_indexes_ds_cnn, permute_filters_ds_cnn
+    compute_descending_filters_score_indexes_ds_cnn, permute_filters_ds_cnn
 from utils.keyword_spotting import load_pre_trained_kws_model, compute_accuracy_test
 from utils.keyword_spotting_data import get_audio_data
 from utils.knapsack import knapsack_find_splits_ds_cnn, \
@@ -24,19 +24,6 @@ from utils.logs import setup_logging, log_print
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gurobi_home',
-                        type=str,
-                        default="",
-                        help="""\
-            Gurobi Linux absolute path.
-            """)
-
-    parser.add_argument('--gurobi_license_file',
-                        type=str,
-                        default="",
-                        help="""\
-                Gurobi license absolute path.
-                """)
     parser.add_argument(
         '--data_url',
         type=str,
@@ -154,7 +141,7 @@ if __name__ == '__main__':
         type=str,
         default='speech_dataset')
 
-    parser.add_argument('--subnets_number', default=4, type=int, help='number of subnetworks to train') # 10,
+    parser.add_argument('--subnets_number', default=4, type=int, help='number of subnetworks to train')
     parser.add_argument(
         '--learning_rate',
         type=str,
@@ -169,20 +156,25 @@ if __name__ == '__main__':
     parser.add_argument('--cuda_device', default=-1, type=int)
     parser.add_argument('--solver_max_iterations', default=3, type=int)
     parser.add_argument('--solver_time_limit', default=100000, type=int)
-    parser.add_argument('--epochs', type=int, default=250, help='training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='training epochs')
     parser.add_argument('--model_sizes', default='l', type=str,
                         help='model sizes')
     parser.add_argument('--seed', default=0, type=int)
-    parser.add_argument('--experimental_runs', default=1, type=int)
+    parser.add_argument('--experimental_runs', default=3, type=int)
     parser.add_argument('--debug', default=False, action='store_true',
                         help='print intermediate activations and weights cuttings dimensions')
-    parser.add_argument('--last_pointwise_filters', default=60, type=int)
+    parser.add_argument('--last_pointwise_filters', default=1, type=int)
     parser.add_argument('--print', default=False, action='store_true',
                         help='print all the subnetworks accuracies')
+    parser.add_argument('--no_finetune', default=False, action='store_true',
+                        help='finetune the models after finding the slicing points ')
     parser.add_argument('--plot', default=False, action='store_true',
                         help='plot the subnetworks finetuning and importance score')
+    parser.add_argument('--peak_memory_usage_constraint', default=False, action='store_true',
+                        help='peak-memory-usage-constraint')
     parser.add_argument('--minibatch_number', default=100, type=int)
-    parser.add_argument('--finetune_head_epochs', default=30, type=int, help='number of epochs to train the model')
+    parser.add_argument('--finetune_head_epochs', default=30, type=int,
+                        help='number of epochs to finetune the model head')
     parser.add_argument('--finetune_batch_norm_epochs', default=10, type=int,
                         help='number of epochs to train the model')
     parser.add_argument('--save_path', default='{}/result/{}/KWS_Knapsack_alpha_{}_{}epochs_{}batch_{}subnetworks_{}',
@@ -193,7 +185,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--constraints_percentages',
         type=str,
-        default='0.25,0.5,0.75', 
+        default='0.25,0.5,0.75',
         help='Constraints percentages', )
 
     args, _ = parser.parse_known_args()
@@ -204,11 +196,8 @@ if __name__ == '__main__':
     setup_deterministic_computation(seed=args.seed)
     gpu_selection(gpu_number=args.cuda_device)
 
-    os.environ[
-        'GUROBI_HOME'] = args.gurobi_home
-    os.environ['GRB_LICENSE_FILE'] = args.gurobi_license_file
-
     print("Gurobi settings:")
+
     print(os.getenv('GUROBI_HOME'))
     print(os.getenv('GRB_LICENSE_FILE'))
 
@@ -222,9 +211,11 @@ if __name__ == '__main__':
 
     for model_size in args.model_sizes.split(','):
 
-        log_print("Loading model {} size {} minibatch number {} learning rates: {} last pointwise filters: {}".format(
-            args.architecture_name, model_size,
-            args.minibatch_number, list(map(float, args.learning_rate.split(','))), args.last_pointwise_filters))
+        log_print(
+            "Loading model {} size {} minibatch number {} learning rates: {} last pointwise filters: {} peak memory usage constraint: {}".format(
+                args.architecture_name, model_size,
+                args.minibatch_number, list(map(float, args.learning_rate.split(','))), args.last_pointwise_filters,
+                args.peak_memory_usage_constraint))
 
         average_final_subnetworks_accuracy, average_final_subnetworks_loss = [[] for _ in
                                                                               range(args.subnets_number)], [[] for _
@@ -237,7 +228,7 @@ if __name__ == '__main__':
         subnetworks_macs_print = [[] for _ in range(args.subnets_number)]
 
         for experimental_run in range(args.experimental_runs):
-
+            setup_deterministic_computation(seed=experimental_run)
             training_steps_list = list(map(int, args.training_steps.split(',')))
             learning_rates_list = list(map(float, args.learning_rate.split(',')))
             lr_boundary_list = training_steps_list[:-1]
@@ -260,7 +251,8 @@ if __name__ == '__main__':
             pretrained_model_accuracy.append(pretrained_model_test_accuracy)
 
             loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-            gradients_accumulation = compute_accumulated_gradients_ds_cnn(model=pretrained_model, train_data=train_data,
+            gradients_accumulation = compute_accumulated_gradients_ds_cnn(model=pretrained_model,
+                                                                          train_data=train_data,
                                                                           loss_fn=loss_fn,
                                                                           args=args)
 
@@ -297,7 +289,6 @@ if __name__ == '__main__':
                 train_ds=train_data,
                 test_ds=test_data, args=args,
                 initial_pretrained_test_accuracy=pretrained_model_test_accuracy)
-
             pointwise_layers_gradients = compute_accumulated_gradients_pointwise_layers(model=pretrained_model,
                                                                                         train_data=train_data,
                                                                                         loss_fn=loss_fn,
@@ -314,24 +305,37 @@ if __name__ == '__main__':
                 model_units_importance_scores.append(
                     descending_importance_score_scores_depthwise_filters[layer_index])
 
-            reds_pretrained_model = convert_ds_cnn_model_to_reds(pretrained_model=pretrained_model, train_ds=train_data,
+            reds_pretrained_model = convert_ds_cnn_model_to_reds(pretrained_model=pretrained_model,
+                                                                 train_ds=train_data,
                                                                  args=args,
                                                                  model_size=model_size,
-                                                                 model_filters=layers_units[model_size],
+                                                                 model_filters=[layers_units[model_size] for _ in range(
+                                                                     6)] if model_size == 'l' else [
+                                                                     layers_units[model_size] for
+                                                                     _ in range(5)],
                                                                  model_settings=model_settings,
                                                                  trainable_parameters=True,
                                                                  trainable_batch_normalization=False)
 
-            layers_filters_macs, layers_filters_byte = reds_pretrained_model.compute_lookup_table(
-                train_data=train_data)
+            layers_filters_macs, layers_filters_byte, layer_filters_activation_maps_byte = reds_pretrained_model.compute_inference_estimations()
 
             importance_list, macs_list, memory_list, macs_targets, memory_targets = initialize_nested_knapsack_solver_ds_cnn(
                 layers_filters_macs=layers_filters_macs,
                 descending_importance_score_scores=model_units_importance_scores,
                 layers_filters_byte=layers_filters_byte,
-                subnetworks_number=args.subnets_number,
                 constraints_percentages=constraints_percentages)
 
+            if model_size == 's':
+                macs_targets = [1477230, 728822, 236414]
+
+            elif model_size == 'l':
+                macs_targets = [15090300, 6965550, 1935450]
+
+            if args.bottom_up:
+                print("Bottom up knapsack - reverse MACS targets")
+                macs_targets.reverse()
+
+            print("MACS targets: {}".format(macs_targets))
             subnetworks_filters_first_convolution, subnetworks_filters_depthwise, subnetworks_filters_pointwise, subnetworks_macs = knapsack_find_splits_ds_cnn(
                 args=args,
                 layers_filter_macs=layers_filters_macs,
@@ -340,9 +344,9 @@ if __name__ == '__main__':
                 importance_list=importance_list,
                 model_size=model_size,
                 macs_list=macs_list,
+                last_pointwise_filters=args.last_pointwise_filters,
                 macs_targets=macs_targets,
                 importance_score_pointwise_filters_kernels=importance_score_pointwise_filters_kernels,
-                last_pointwise_filters=args.last_pointwise_filters,
                 bottom_up=args.bottom_up,
                 units_layer_size=layers_units[model_size])
 
@@ -351,6 +355,7 @@ if __name__ == '__main__':
                 subnetworks_filters_depthwise=subnetworks_filters_depthwise,
                 subnetworks_filters_pointwise=subnetworks_filters_pointwise)
 
+            print("Finetuning subnetworks after finding the slicing points")
             optimizer = tf.keras.optimizers.experimental.Adam(learning_rate=lr_schedule)
             optimizer.build(var_list=reds_pretrained_model.trainable_variables)
 
@@ -400,4 +405,3 @@ if __name__ == '__main__':
 
         log_print(
             f"pretrained model average test accuracy: {np.array(pretrained_model_accuracy).mean():.4f}% std: {np.array(pretrained_model_accuracy).std():.4f}")
-
