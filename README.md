@@ -82,13 +82,13 @@ To run the solver *without* the peak memory usage constraint pass the *--peak_me
 l. 
 
 ## REDS for Vision Transformers
-To run the Integer Linear Programming Structural Pruning formulation for ViT run the following command:
+To run the Integer Linear Programming Subnetworks Search [formulation](https://github.com/FraCorti/REDS_TOMC/blob/58cbd497351053fb025d4414e0f0384b27fdea7a/ViT_knapsack.py#L226) for Vision Transformers run the following command:
 
 ```
-python ViT_ILP --gurobi_license_file path/to/license/gurobi.lic --gurobi_home path/to/installation//gurobi/gurobi1002/linux64 --hugginface_token personal_hugginface_token --model_name vit_model_name
+python ViT_knapsack.py --gurobi_license_file path/to/license/gurobi.lic --gurobi_home path/to/installation//gurobi/gurobi1002/linux64 --hugginface_token personal_hugginface_token --model_name vit_model_name
 ```
 
-Remember need to pass as flag your personal [Hugginface User Access Token](https://huggingface.co/docs/hub/security-tokens) to create the streaming ImageNet1k dataloader using the [Hugginface datasets](https://huggingface.co/docs/hub/security-tokens) library. 
+The script must receive as input flag your personal [Hugginface User Access Token](https://huggingface.co/docs/hub/security-tokens) to create the streaming ImageNet1k dataloader using the [Hugginface datasets](https://huggingface.co/docs/hub/security-tokens) library. 
 
-## TensorFlow Lite for Microcontrollers Analysis 
-We extended the Tensorflow Lite for Microcontrollers framework to support REDS out of the box and measure on-device inference and submodel switching time. The code is available [here](https://github.com/aschesklave/TFlite-Micro-Cutting). 
+## TensorFlow Lite for Microcontrollers Runtime Adaptation Analysis 
+We extended the Tensorflow Lite for Microcontrollers framework to support REDS out of the box and measure on-device inference and submodel switching time for fully-connected models. The code is available [here](https://github.com/aschesklave/TFlite-Micro-Cutting). 
