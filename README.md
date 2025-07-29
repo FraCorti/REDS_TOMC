@@ -92,3 +92,14 @@ The script must receive as input flag your personal [Hugginface User Access Toke
 
 ## TensorFlow Lite for Microcontrollers Runtime Adaptation Analysis 
 We extended the Tensorflow Lite for Microcontrollers framework to support REDS out of the box and measure on-device inference and submodel switching time for fully-connected models. The code is available [here](https://github.com/aschesklave/TFlite-Micro-Cutting). 
+## BibTeX
+
+If you found this repository useful, please consider citing our work.
+```
+@article{corti2023reds,
+  title={REDS: Resource-Efficient Deep Subnetworks for Dynamic Resource Constraints},
+  author={Corti, Francesco and Maag, Balz and Schauer, Joachim and Pferschy, Ulrich and Saukh, Olga},
+  journal={arXiv preprint arXiv:2311.13349},
+  year={2023}
+}
+```
